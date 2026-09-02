@@ -5,7 +5,7 @@ ENV NPM_CONFIG_LOGLEVEL warn
 WORKDIR /app
 COPY . .
 COPY .env.example .env.development
-RUN npm install -g pnpm && pnpm i
+RUN npm install -g pnpm@9 && pnpm i
 RUN pnpm build
 
 # production stage

@@ -1,0 +1,76 @@
+# 自动同步上游 naroat/tools-web → 本 fork，并在有更新时重建镜像。
+# 触发：push(master) / 每日 03:00 UTC(=北京 11:00) / 手动 workflow_dispatch
+#
+# 为什么用 merge 而不是 rebase：
+#   rebase 会重写本地提交的 SHA，普通 push 必然被拒（non-fast-forward），
+#   必须 force-with-lease 才能推上去。merge 只新增一个合并提交，push 天然快进。
+#
+# 为什么加 -X theirs：
+#   冲突时以上游为准。本 fork 的本地改动只有 CI 文件，其余应与上游一致；
+#   需要长期保留的本地改动请写进新文件，不要去改上游已有的文件。
+#
+# 保活：GitHub 会在仓库 60 天无活动时自动禁用 schedule(disabled_inactivity)，
+#   所以当上游长时间无更新、且最后一次提交已超过 45 天时补一个空提交。
+
+name: sync-upstream
+
+on:
+  push:
+    branches: [master]
+  schedule:
+    - cron: "0 3 * * *"   # 每日 03:00 UTC = 北京 11:00
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Sync from upstream
+        id: sync
+        run: |
+          set -euo pipefail
+          UPSTREAM_URL=https://github.com/naroat/tools-web.git
+          git remote add upstream "$UPSTREAM_URL" 2>/dev/null \
+            || git remote set-url upstream "$UPSTREAM_URL"
+          git fetch upstream master --quiet
+          git config user.name "ilolita945"
+          git config user.email "ilolita945@users.noreply.github.com"
+
+          BEHIND=$(git rev-list --count HEAD..upstream/master)
+          echo "behind=${BEHIND}" >> "$GITHUB_OUTPUT"
+
+          if [ "$BEHIND" -eq 0 ]; then
+            LAST=$(git log -1 --format=%ct HEAD)
+            DAYS=$(( ( $(date +%s) - LAST ) / 86400 ))
+            if [ "$DAYS" -ge 45 ]; then
+              git commit --allow-empty -m "chore: keepalive $(date -u +%F)"
+              git push origin master
+              echo "::notice::上游无更新；已推送保活提交（距上次提交 ${DAYS} 天）"
+            else
+              echo "::notice::已与上游同步，无需更新"
+            fi
+            exit 0
+          fi
+
+          git merge --no-edit -X theirs upstream/master
+          git push origin master
+          echo "::notice::已合并上游 ${BEHIND} 个提交并推送"
+
+      - name: Rebuild images
+        if: steps.sync.outputs.behind != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run docker-build.yml -R "${GITHUB_REPOSITORY}" --ref master
